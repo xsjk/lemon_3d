@@ -7,6 +7,7 @@ import pdb
 import yaml
 from tools.models.model_LEMON_d import LEMON
 from tools.models.LEMON_noCur import LEMON_wocur
+from tools.models.LEMON_noCur_noHuman import LEMON_wocur_nohuman
 from PIL import Image
 from dataset_utils.dataset_3DIR import _3DIR
 from tools.utils.build_layer import create_mesh, build_smplh_mesh, Pelvis_norm
@@ -237,6 +238,48 @@ def inference_single_wo_curvature(model, opt, dict, device, outdir):
     object_save_path = os.path.join(outdir, opt.img_path.split('/')[-1].split('.')[0]+'_object.ply')
     o3d.io.write_point_cloud(object_save_path, pred_point)
 
+def inference_single_wo_curvature_no_human(model, opt, dict, device, outdir):
+
+    checkpoint = torch.load(dict['best_checkpoint'], map_location=device)
+    # model.load_state_dict(/checkpoint)
+    model = model.to(device)
+    model = model.eval()
+
+    #load image
+    img_size = (224, 224)
+    img = mask_img(opt.img_path, opt.mask)
+    Img = img.resize(img_size)
+    I = img_normalize(Img).unsqueeze(0).to(device)
+
+    #load object
+    Pts, affordance_label = extract_point_file(opt.object)
+    Pts = pc_normalize(Pts)
+    Pts = Pts.transpose()
+    O = torch.from_numpy(Pts).float().unsqueeze(0).to(device)
+    pre_affordance, pre_spatial, _, _ = model(I, O)
+    pre_affordance = pre_affordance[0].cpu().detach().numpy()
+
+    #save
+    spatial_center = pre_spatial[0].detach().cpu().numpy()
+    spatial_sphere = generate_proxy_sphere(spatial_center, opt.object)
+    colors = np.array([255.0, 255.0, 255.0])[None, :].repeat(6890, axis=0)
+    colors = colors / 255.0
+
+    spatial_save_path = os.path.join(outdir, opt.img_path.split('/')[-1].split('.')[0]+'_spatial.ply')
+    o3d.io.write_triangle_mesh(spatial_save_path, spatial_sphere)
+
+    reference_color = np.array([255, 0, 0])
+    back_color = np.array([190, 190, 190])
+    pred_point = o3d.geometry.PointCloud()
+    pred_point.points = o3d.utility.Vector3dVector(O[0].detach().cpu().numpy().transpose())
+    pred_color = np.zeros((O.shape[2],3))
+    for i, pred in enumerate(pre_affordance):
+        scale_i = pred
+        pred_color[i] = (reference_color-back_color) * scale_i + back_color
+    pred_point.colors = o3d.utility.Vector3dVector(pred_color.astype(np.float64) / 255.0)
+    object_save_path = os.path.join(outdir, opt.img_path.split('/')[-1].split('.')[0]+'_object.ply')
+    o3d.io.write_point_cloud(object_save_path, pred_point)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=12, help='batch_size')
@@ -261,10 +304,13 @@ if __name__ == '__main__':
     val_dataset = _3DIR(dict['val_image'], dict['val_pts'], dict['human_3DIR'], dict['behave'], mode='val')
     val_loader = DataLoader(val_dataset, batch_size=opt.batch_size, shuffle=False, num_workers=8)
     curvature = dict['curvature']
+    use_human_feature = dict['use_human_feature']
     if curvature:
         model = LEMON(dict['emb_dim'], run_type='infer', device=device)
-    else:
+    elif use_human_feature:
         model = LEMON_wocur(dict['emb_dim'], run_type='infer', device=device)
+    else:
+        model = LEMON_wocur_nohuman(dict['emb_dim'], run_type='infer', device=device)
     #batch
     infer_type = dict['infer_type']
     if infer_type == 'batch':
@@ -272,5 +318,7 @@ if __name__ == '__main__':
     elif infer_type == 'single':
         if curvature:
             inference_single(model, opt, dict, device, opt.outdir)
-        else:
+        elif use_human_feature:
             inference_single_wo_curvature(model, opt, dict, device, opt.outdir)
+        else:
+            inference_single_wo_curvature_no_human(model, opt, dict, device, opt.outdir)

@@ -33,9 +33,10 @@ class _3DIR(Dataset):
         super(_3DIR).__init__()
 
         self.mode = mode
-        self.img_files = self.read_file(img_file)
-        self.data_dict = json.load(open(human_file, 'r'))
-        self.behave_dict = json.load(open(behave_file, 'r'))
+        self.img_files = [] # self.read_file(img_file)
+        self.data_dict = {} # json.load(open(human_file, 'r'))
+        self.behave_dict = {} #json.load(open(behave_file, 'r'))
+
 
         if mode == 'train':
             number_dict = {'Earphone':0, 'Baseballbat':0, 'Tennisracket':0, 'Bag':0, 'Motorcycle':0, 'Guitar':0, 
@@ -52,7 +53,7 @@ class _3DIR(Dataset):
                 self.pts_split[obj_] = temp_split
                 start_index += self.number_dict[obj_]
         else:
-            self.obj_files = self.read_file(obj_file)
+            self.obj_files = [] # self.read_file(obj_file)
 
         self.affordance_list = ['grasp', 'lift', 'open', 'lay', 'sit', 'support', 'wrapgrasp', 'pour', 
                         'move', 'pull', 'wear', 'press', 'cut', 'stab', 'ride', 'play', 'carry']

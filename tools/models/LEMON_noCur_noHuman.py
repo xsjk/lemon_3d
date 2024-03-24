@@ -76,6 +76,7 @@ class Multi_Branch_Attention(nn.Module):
         out2 = rearrange(out2, 'b h n d -> b n (h d)')
         return out1, out2
     
+    
 class Cross_Attention(nn.Module):
     def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
         super().__init__()
@@ -108,6 +109,35 @@ class Cross_Attention(nn.Module):
 
         return out
 
+class Self_Attention(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.):
+        super().__init__()
+        self.inner_dim = dim_head * heads
+        self.dim_head = dim_head
+
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+
+        self.to_qkv = nn.Linear(dim, self.inner_dim * 3, bias=False)
+
+    def forward(self, input):
+        B = input.size(0)
+        
+        qkv = self.to_qkv(input).chunk(3, dim=-1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), qkv)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+
+        attn = self.dropout(self.attend(dots))
+
+        out = torch.matmul(attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+
+        return out
+    
 class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
         super().__init__()
@@ -161,68 +191,35 @@ class Intention_Excavation(nn.Module):
             def forward(self, x):
                 return x.transpose(1, 2)
         self.device = device
-        self.co_intention = Multi_Branch_Attention(dim = input_dim, heads = 12, dropout = 0.3, dim_head = 64)
+        self.attention = Cross_Attention(dim = input_dim, heads = 12, dropout = 0.3, dim_head = 64)
         self.T_o = nn.Parameter(torch.zeros(1, 1, input_dim))
         self.T_h = nn.Parameter(torch.zeros(1, 1, input_dim))
         self.cosine = nn.CosineEmbeddingLoss()
 
-    def forward(self ,F_i, F_o, F_h):
+    def forward(self ,F_i, F_o):
 
         B = F_i.size(0)
 
         F_to = torch.cat((self.T_o.expand(B,-1,-1), F_o), dim=1)
-        F_th = torch.cat((self.T_o.expand(B,-1,-1), F_h), dim=1)
 
-        F_to_, F_th_ = self.co_intention(F_to, F_th, F_i)
+        F_to_ = self.attention(F_to, F_i)
 
-        T_o_, T_h_ =  F_to_[:,0,:], F_th_[:,0,:]
-        F_o_, F_h_ = F_to_[:,1:,:], F_th_[:,1:,:]
+        T_o_ =  F_to_[:,0,:]
+        F_o_ = F_to_[:,1:,:]
 
-        tar = torch.ones(B).to(self.device)
-        varphi = self.cosine(T_o_, T_h_, tar)
-
-        return T_o_, T_h_, F_o_, F_h_, varphi
+        return T_o_, F_o_
     
 class Curvature_guided_Geometric_Correlation(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
-        class SwapAxes(nn.Module):
-            def __init__(self):
-                super().__init__()
-            
-            def forward(self, x):
-                return x.transpose(1, 2)
-
-        self.f_m1 = Cross_Attention(dim = input_dim, heads = 12, dropout = 0.3, dim_head = 64)
-        self.f_m2 = Cross_Attention(dim = input_dim, heads = 12, dropout = 0.3, dim_head = 64)
-
-        self.fusion_hm = nn.Sequential(
-            nn.Conv1d(input_dim*2, input_dim, 1),
-            nn.BatchNorm1d(input_dim),
-            nn.LeakyReLU(negative_slope=0.1),
-            SwapAxes(),
-        )
-
-        self.fusion_obj = nn.Sequential(
-            nn.Conv1d(input_dim*2, input_dim, 1),
-            nn.BatchNorm1d(input_dim),
-            nn.LeakyReLU(negative_slope=0.1),
-            SwapAxes(),
-        )
-
         self.affordance = Transformer(dim = input_dim, depth = 1, heads = 12, mlp_dim = 768, dropout = 0.3, dim_head = 64)
-        self.contact = Transformer(dim = input_dim, depth = 1, heads = 12, mlp_dim = 768, dropout = 0.3, dim_head = 64)
 
-    def forward(self, F_o_, F_h_, T_o_, T_h_):
+    def forward(self, F_o_, T_o_):
 
-
-        conditional_aff = torch.cat((T_o_.unsqueeze(dim=1), F_h_), dim=1)
-        conditional_contact = torch.cat((T_h_.unsqueeze(dim=1), F_o_), dim=1)
-
+        conditional_aff = T_o_.unsqueeze(dim=1)
         phi_a = self.affordance(F_o_, conditional_aff)
-        phi_c = self.contact(F_h_, conditional_contact)
 
-        return phi_a, phi_c
+        return phi_a
 
 class Contact_aware_Spatial_Relation(nn.Module):
     def __init__(self, input_dim, mlp_dim):
@@ -230,7 +227,7 @@ class Contact_aware_Spatial_Relation(nn.Module):
 
         self.T_sp = nn.Embedding(3, input_dim)
         self.spatial_pse = nn.Parameter(torch.randn(1, 3+2, input_dim))
-        self.f_p = Cross_Attention(dim = input_dim, heads = 12, dropout = 0.3, dim_head = 64)
+        self.f_p = Self_Attention(dim = input_dim, heads = 12, dropout = 0.3, dim_head = 64)
         self.proj = nn.Sequential(
             nn.Linear(input_dim, input_dim//6),
             nn.BatchNorm1d(input_dim//6),
@@ -241,16 +238,14 @@ class Contact_aware_Spatial_Relation(nn.Module):
             nn.Linear(input_dim // 16, 3),
         )
 
-    def forward(self, F_co, F_ch, phi_c, T_o_, T_h_):
+    def forward(self, F_co, T_o_):
         B = F_co.size(0)
         F_co = F_co.max(dim=1, keepdim=True)[0]
-        F_ch = F_ch.max(dim=1, keepdim=True)[0]
 
         spatial_token = self.T_sp.weight.expand(B,-1,-1)
         spatial_query = torch.cat((spatial_token, F_co, T_o_.unsqueeze(dim=1)), dim=1) + self.spatial_pse.expand(B,-1,-1)
 
-        spatial_kv = torch.cat((phi_c, F_ch, T_h_.unsqueeze(dim=1)), dim=1)
-        feats = self.f_p(spatial_query, spatial_kv)
+        feats = self.f_p(spatial_query)
         phi_p = feats[:,0:3,:]         #[B, 3, C]
 
         return phi_p
@@ -304,22 +299,19 @@ class Decoder(nn.Module):
         self.contact_up_fine = nn.Linear(1723, 6890)
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, phi_a, phi_c, phi_p, semantic_feats):
+    def forward(self, phi_a, phi_p, semantic_feats):
 
         B = phi_a.size(0)
         affordance = self.aff_head(phi_a)                                  
         affordance = self.sigmoid(affordance)
 
-        contact_coarse = self.contact_head(phi_c)
-        contact_fine = self.contact_up_fine(contact_coarse.mT)              
-
         spatial = self.spatial_head(phi_p).squeeze(dim=-1)
 
         semantic = self.content(semantic_feats)
 
-        return [self.sigmoid(contact_coarse), self.sigmoid(contact_fine.mT)], affordance, spatial, semantic
+        return affordance, spatial, semantic
 
-class LEMON_wocur(nn.Module):
+class LEMON_wocur_nohuman(nn.Module):
     def __init__(self, feat_dim, run_type, device):
         super().__init__()
         class SwapAxes(nn.Module):
@@ -343,24 +335,19 @@ class LEMON_wocur(nn.Module):
 
         self.decoder = Decoder(feat_dim, device=self.device)
 
-    def forward(self, I, O, H, meta_masks=None):
+    def forward(self, I, O, meta_masks=None):
         # I: [B, 3, 224, 224], O: [1, 3, 2048], H: [1, 6390, 3]
         B = I.size(0)
-        H = self.vertex_sampler.downsample(H, n1=0, n2=1)                      
-        if meta_masks != None:
-            constant_tensor = torch.ones_like(H).to(self.device)*0.01
-            H = H*meta_masks + constant_tensor*(1-meta_masks)
-        F_i, semantic_feats = self.img_encoder(I)                      
-        F_o = self.obj_encoder(O)                                     
-        F_h = self.hm_encoder(H.mT)                                    
+        F_i, semantic_feats = self.img_encoder(I)       # [1, 49, 768]                
+        F_o = self.obj_encoder(O)                       # [1, 768, 2048] 
 
-        T_o_, T_h_, F_o_, F_h_, varphi = self.Intention(F_i, F_o.mT, F_h.mT)
-        phi_a, phi_c = self.Geometry_Correlation(F_o_, F_h_, T_o_, T_h_)
-        phi_p = self.Spatial(F_o_, F_h_, phi_c, T_o_, T_h_)
+        T_o_, F_o_ = self.Intention(F_i, F_o.mT)        # [1, 768], [1, 2048, 768]
+        phi_a = self.Geometry_Correlation(F_o_, T_o_)   # [1, 2048, 768]
+        phi_p = self.Spatial(F_o_, T_o_)                # [1, 3, 768]
 
-        contact, affordance, spatial, semantic = self.decoder(phi_a, phi_c, phi_p, semantic_feats)
+        affordance, spatial, semantic = self.decoder(phi_a, phi_p, semantic_feats)  # [1, 2048, 1], [1, 3], [1, 17]
 
-        return contact, affordance, spatial, semantic, varphi
+        return affordance, spatial, semantic, 0
 
 if __name__=='__main__':
     pass
